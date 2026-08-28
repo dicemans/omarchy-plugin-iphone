@@ -49,7 +49,7 @@ Pairing is a one-time thing; after that, plugging in just works.
 | `libimobiledevice` | talking to the iPhone | Usually already installed. |
 | `usbmuxd` | the USB connection | The panel installs and starts it for you. |
 | `ifuse` | opening the camera roll | The panel installs it for you. |
-| `rsync` | importing photos | Present on most systems. |
+| `rsync` | importing photos | The panel installs it for you. |
 | `xdg-open` | opening folders | Present on any desktop. |
 
 ## Install

@@ -67,10 +67,11 @@ valid_udid() { [[ $1 =~ ^[A-Fa-f0-9-]{8,64}$ ]]; }
 # non-ok line into the setup card; the names are stable contract, the wording
 # lives in Model.js.
 cmd_deps() {
-  local usbmuxd_state=ok ifuse_state=ok idev_state=ok
+  local usbmuxd_state=ok ifuse_state=ok idev_state=ok rsync_state=ok
   command -v idevice_id >/dev/null 2>&1 || idev_state=missing
   command -v usbmuxd >/dev/null 2>&1 || usbmuxd_state=missing
   command -v ifuse >/dev/null 2>&1 || ifuse_state=missing
+  command -v rsync >/dev/null 2>&1 || rsync_state=missing
   if [[ $usbmuxd_state == ok ]]; then
     if ! pgrep -x usbmuxd >/dev/null 2>&1; then
       # udev starts the muxer on plug-in, so "not running with no phone
@@ -90,6 +91,7 @@ cmd_deps() {
   printf 'libimobiledevice\t%s\n' "$idev_state"
   printf 'usbmuxd\t%s\n' "$usbmuxd_state"
   printf 'ifuse\t%s\n' "$ifuse_state"
+  printf 'rsync\t%s\n' "$rsync_state"
 }
 
 # Install and activate whatever `deps` reported, in ONE pkexec call so the
@@ -105,6 +107,7 @@ cmd_fix_deps() {
   command -v usbmuxd >/dev/null 2>&1 || pkgs+=(usbmuxd)
   command -v ifuse >/dev/null 2>&1 || pkgs+=(ifuse)
   command -v idevice_id >/dev/null 2>&1 || pkgs+=(libimobiledevice)
+  command -v rsync >/dev/null 2>&1 || pkgs+=(rsync)
 
   # Nothing to install and the daemon answers: nothing left that needs root.
   if ((${#pkgs[@]} == 0)) && pgrep -x usbmuxd >/dev/null 2>&1 \
