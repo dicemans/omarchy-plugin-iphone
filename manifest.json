@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.dicemans.iphone",
+  "name": "iPhone",
+  "version": "0.1.0",
+  "author": "Paolo Pellicori",
+  "license": "MIT",
+  "description": "Your iPhone on the bar: presence and battery at a glance, guided pairing (trust dialog included), and your camera roll one click away in the file manager. No jailbreak, no app on the phone.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "iPhone",
+    "description": "Detects your iPhone over USB, shows its battery in the bar, walks you through pairing, and opens the camera roll (DCIM) in your file manager. Missing system pieces (usbmuxd, ifuse) are installed from the panel behind a single polkit authorization.",
+    "category": "Hardware",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 15,
+      "showBattery": true,
+      "preferredUdid": "",
+      "importFolder": "~/Pictures/iPhone"
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 300,
+        "step": 5,
+        "defaultValue": 15,
+        "description": "How often the device list and battery are refreshed while the panel is open. Kept deliberately high: each poll wakes the phone briefly. Closed, the widget refreshes every 60 seconds at most."
+      },
+      {
+        "key": "showBattery",
+        "type": "boolean",
+        "label": "Show battery in the bar",
+        "defaultValue": true,
+        "description": "Paint the phone's battery percentage next to the bar icon while a paired iPhone is connected."
+      },
+      {
+        "key": "preferredUdid",
+        "type": "string",
+        "label": "Only show this device (UDID)",
+        "defaultValue": "",
+        "description": "With several iPhones around, list only the one whose UDID contains this text. Empty shows all of them."
+      },
+      {
+        "key": "importFolder",
+        "type": "path",
+        "label": "Import photos into",
+        "defaultValue": "~/Pictures/iPhone",
+        "description": "Where 'Import new photos' copies the camera roll. Only files not already there are copied, so the folder stays safe to reorganize."
+      }
+    ]
+  }
+}

@@ -1,0 +1,361 @@
+#!/bin/bash
+
+# Helper for the io.github.dicemans.iphone Omarchy shell plugin.
+#
+# The QML panel stays presentational: every libimobiledevice call, mount and
+# launch lives here so it can be read, tested, and fixed from a terminal
+# without touching the shell.
+#
+#   iphone-ctl deps                 what is installed/running, one line each
+#   iphone-ctl fix-deps             install + activate what is missing (one pkexec)
+#   iphone-ctl status               TSV, one line per device
+#   iphone-ctl pair|unpair <udid>
+#   iphone-ctl mount|unmount <udid>
+#   iphone-ctl photos <udid>        mount if needed, open DCIM in the file manager
+#   iphone-ctl import <udid> <dir>  copy new camera-roll files into a folder
+#
+# The plugin is deliberately USB-only: it does the things an iPhone actually
+# lets a Linux computer do well — presence, battery, and the camera roll over
+# the cable. WiFi and Bluetooth were tried and dropped: iOS refuses a generic
+# computer the data over those, so there was nothing honest to show.
+
+set -uo pipefail
+
+# Hard caps on everything read from external tools: no producer may grow the
+# long-running shell process.
+MAX_ROWS=16        # devices listed (nobody owns 17 iPhones)
+MAX_BYTES=65536    # bytes accepted from any single invocation
+MAX_FIELD=256      # characters kept per field
+MAX_DIAG=400       # characters of diagnostic text ever printed
+
+# Mounts are per-user and per-device, on tmpfs, gone at logout.
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+clip() {
+  local value="${1//[$'\t\n\r']/ }"
+  printf '%s' "${value:0:MAX_FIELD}"
+}
+
+die() {
+  local reason="${1:0:MAX_DIAG}"
+  echo "$reason" >&2
+  exit 1
+}
+
+bounded() {
+  local rows="$1"; shift
+  "$@" 2>/dev/null | head -c "$MAX_BYTES" | head -n "$rows"
+  return "${PIPESTATUS[0]}"
+}
+
+require_idevice() {
+  command -v idevice_id >/dev/null 2>&1 && command -v idevicepair >/dev/null 2>&1 \
+    || die "libimobiledevice-missing"
+}
+
+mount_point() {
+  printf '%s/iphone-%s' "$RUNTIME_DIR" "$1"
+}
+
+# A UDID is hex (old style) or hex-with-dash (new style); anything else never
+# reaches a command line.
+valid_udid() { [[ $1 =~ ^[A-Fa-f0-9-]{8,64}$ ]]; }
+
+# --------------------------------------------------------------------- deps
+
+# One line per piece: name \t ok|missing|inactive|stuck. The panel turns any
+# non-ok line into the setup card; the names are stable contract, the wording
+# lives in Model.js.
+cmd_deps() {
+  local usbmuxd_state=ok ifuse_state=ok idev_state=ok
+  command -v idevice_id >/dev/null 2>&1 || idev_state=missing
+  command -v usbmuxd >/dev/null 2>&1 || usbmuxd_state=missing
+  command -v ifuse >/dev/null 2>&1 || ifuse_state=missing
+  if [[ $usbmuxd_state == ok ]]; then
+    if ! pgrep -x usbmuxd >/dev/null 2>&1; then
+      # udev starts the muxer on plug-in, so "not running with no phone
+      # attached" is normal; only report inactive when a device is visible
+      # on USB but the muxer still is not up.
+      if lsusb 2>/dev/null | grep -qi 'apple'; then
+        usbmuxd_state=inactive
+      fi
+    elif [[ $idev_state == ok ]] && ! idevice_id -l >/dev/null 2>&1; then
+      # The daemon runs but its socket does not answer — a udev unbind storm
+      # mid-enumeration can wedge usbmuxd on an empty list it never leaves.
+      # A restart, which re-scans attached devices, is the cure, so this
+      # routes to the same setup button.
+      usbmuxd_state=stuck
+    fi
+  fi
+  printf 'libimobiledevice\t%s\n' "$idev_state"
+  printf 'usbmuxd\t%s\n' "$usbmuxd_state"
+  printf 'ifuse\t%s\n' "$ifuse_state"
+}
+
+# Install and activate whatever `deps` reported, in ONE pkexec call so the
+# user authenticates once. Mounting itself is user-space FUSE — there is no
+# group or ACL half to this: packages plus daemon activation is the whole
+# privileged story. It runs from the shell with no terminal, so the elevation
+# goes through polkit (pkexec), which asks graphically.
+cmd_fix_deps() {
+  command -v pkexec >/dev/null 2>&1 || die "polkit-missing"
+  command -v pacman >/dev/null 2>&1 || die "pacman-missing"
+
+  local -a pkgs=()
+  command -v usbmuxd >/dev/null 2>&1 || pkgs+=(usbmuxd)
+  command -v ifuse >/dev/null 2>&1 || pkgs+=(ifuse)
+  command -v idevice_id >/dev/null 2>&1 || pkgs+=(libimobiledevice)
+
+  # Nothing to install and the daemon answers: nothing left that needs root.
+  if ((${#pkgs[@]} == 0)) && pgrep -x usbmuxd >/dev/null 2>&1 \
+    && idevice_id -l >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # `restart`, not `start`: usbmuxd re-scans every attached device on
+  # startup, which picks up the phone that was ALREADY plugged in when the
+  # packages landed, and unwedges a daemon that lost its device list.
+  # Deliberately NO `udevadm trigger` — a bus-wide trigger fires unbind/bind
+  # for every USB device, and one such storm is what wedges usbmuxd.
+  local err rc
+  err=$(pkexec sh -c '
+    set -e
+    if [ "$#" -gt 0 ]; then pacman -S --needed --noconfirm -- "$@"; fi
+    systemctl restart usbmuxd.service 2>/dev/null || true
+  ' fix "${pkgs[@]}" 2>&1 >/dev/null)
+  rc=$?
+  if ((rc == 126 || rc == 127)); then die "fix-dismissed"; fi
+  if ((rc != 0)); then
+    err=$(printf '%s\n' "$err" | head -1)
+    die "${err:-fix-failed}"
+  fi
+}
+
+# ------------------------------------------------------------------- status
+
+# What idevicepair can say about a device, reduced to one word the panel
+# renders as a state, not an error: pairing is a conversation with a human
+# holding the phone, and each of its stops has its own next step.
+pair_state() {
+  local udid="$1" out
+  out=$(idevicepair -u "$udid" validate 2>&1)
+  out=${out,,}
+  case "$out" in
+    *success*) echo paired ;;
+    *denied*) echo denied ;;
+    *"trust dialog"*) echo trust-pending ;;
+    *passcode*) echo locked ;;
+    *"not paired"* | *"invalid host id"*) echo unpaired ;;
+    *) echo unknown ;;
+  esac
+}
+
+device_info() {
+  local udid="$1" key="$2" domain="${3:-}"
+  local -a args=(-u "$udid")
+  [[ -n $domain ]] && args+=(-q "$domain")
+  args+=(-k "$key")
+  ideviceinfo "${args[@]}" 2>/dev/null | head -1
+}
+
+# A FUSE mount can outlive its AFC session (a heavy copy, a re-lock) and then
+# stat as EIO while still occupying the mountpoint. "Mounted" means it still
+# answers, not merely that something is there.
+mount_alive() {
+  mountpoint -q "$1" 2>/dev/null && ls "$1" >/dev/null 2>&1
+}
+
+# One line per device:
+#   udid \t name \t state \t battery% \t charging \t mounted \t ios
+# Battery and identity are only readable once paired; before that the fields
+# are empty rather than guessed at.
+cmd_status() {
+  require_idevice
+  command -v usbmuxd >/dev/null 2>&1 || die "usbmuxd-missing"
+  local filter="${1:-}"
+
+  local ids
+  # A failing idevice_id WITH a phone on the bus is a wedged muxer; without
+  # one it is the normal idle state on Arch (usbmuxd exits when the last
+  # device leaves), so that is an empty desk, not an error.
+  ids=$(bounded "$MAX_ROWS" idevice_id -l) || {
+    lsusb 2>/dev/null | grep -qi apple && die "muxd-unreachable"
+    return 0
+  }
+  [[ -n $ids ]] || return 0
+
+  local udid name state batt charging mounted ios
+  while read -r udid; do
+    [[ -n $udid ]] || continue
+    valid_udid "$udid" || continue
+    if [[ -n $filter && $udid != *"$filter"* ]]; then continue; fi
+    state=$(pair_state "$udid")
+    name=""; batt=""; charging=0; ios=""
+    if [[ $state == paired ]]; then
+      name=$(device_info "$udid" DeviceName)
+      ios=$(device_info "$udid" ProductVersion)
+      batt=$(device_info "$udid" BatteryCurrentCapacity com.apple.mobile.battery)
+      [[ $(device_info "$udid" BatteryIsCharging com.apple.mobile.battery) == "true" ]] && charging=1
+      [[ $batt =~ ^[0-9]{1,3}$ ]] || batt=""
+    fi
+    mounted=0
+    mount_alive "$(mount_point "$udid")" && mounted=1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$(clip "$udid")" "$(clip "$name")" "$state" \
+      "$batt" "$charging" "$mounted" "$(clip "$ios")"
+  done <<<"$ids"
+}
+
+# --------------------------------------------------------------- lifecycle
+
+cmd_pair() {
+  local udid="$1"
+  require_idevice
+  [[ -n $udid ]] || die "no-device"
+  valid_udid "$udid" || die "no-device"
+  local out
+  out=$(idevicepair -u "$udid" pair 2>&1)
+  case "${out,,}" in
+    *success*) return 0 ;;
+    *denied*) die "pair-denied" ;;
+    *"trust dialog"*) die "trust-pending" ;;
+    *passcode*) die "passcode-locked" ;;
+    *"no device"*) die "no-device" ;;
+    *) die "$(printf '%s\n' "$out" | head -1)" ;;
+  esac
+}
+
+cmd_unpair() {
+  local udid="$1"
+  require_idevice
+  [[ -n $udid ]] || die "no-device"
+  valid_udid "$udid" || die "no-device"
+  mount_alive "$(mount_point "$udid")" && cmd_unmount "$udid"
+  idevicepair -u "$udid" unpair >/dev/null 2>&1 || die "unpair-failed"
+}
+
+cmd_mount() {
+  local udid="$1"
+  require_idevice
+  command -v ifuse >/dev/null 2>&1 || die "ifuse-missing"
+  [[ -n $udid ]] || die "no-device"
+  valid_udid "$udid" || die "no-device"
+  local mnt
+  mnt=$(mount_point "$udid")
+  mount_alive "$mnt" && return 0
+  # Clear whatever sits there and does not answer — a stale endpoint a
+  # dropped session left behind — before rebuilding. Best-effort: on a clean
+  # first mount there is simply nothing to clear.
+  fusermount3 -uz "$mnt" 2>/dev/null || fusermount -uz "$mnt" 2>/dev/null
+  rmdir "$mnt" 2>/dev/null
+  [[ $(pair_state "$udid") == paired ]] || die "not-paired"
+  mkdir -p "$mnt" || die "mount-failed"
+  # ifuse says exactly why it refused — a locked phone, most often, right
+  # after pairing.
+  local err
+  if ! err=$(ifuse -u "$udid" "$mnt" 2>&1 >/dev/null); then
+    rmdir "$mnt" 2>/dev/null
+    case "${err,,}" in
+      *password* | *locked*) die "device-locked" ;;
+      *) die "$(printf '%s\n' "${err:-mount-failed}" | head -1)" ;;
+    esac
+  fi
+}
+
+cmd_unmount() {
+  local udid="$1"
+  [[ -n $udid ]] || die "no-device"
+  valid_udid "$udid" || die "no-device"
+  local mnt
+  mnt=$(mount_point "$udid")
+  mountpoint -q "$mnt" 2>/dev/null || return 0
+  fusermount3 -u "$mnt" 2>/dev/null || fusermount -u "$mnt" 2>/dev/null || die "unmount-failed"
+  rmdir "$mnt" 2>/dev/null
+}
+
+# Detach GUI launches from the shell process.
+launch_detached() {
+  if command -v uwsm-app >/dev/null 2>&1; then
+    uwsm-app -- "$@" >/dev/null 2>&1 &
+  else
+    setsid "$@" >/dev/null 2>&1 &
+  fi
+  disown 2>/dev/null
+}
+
+# Mount if needed and open the camera roll where photos actually get looked
+# at: the user's file manager, which already knows how to thumbnail HEIC.
+cmd_photos() {
+  local udid="$1"
+  cmd_mount "$udid"
+  local mnt target
+  mnt=$(mount_point "$udid")
+  target="$mnt/DCIM"
+  [[ -d $target ]] || target="$mnt"
+  launch_detached xdg-open "$target"
+}
+
+# Copy what is new in the camera roll into a folder of the user's choice.
+# `--ignore-existing` is the contract: photos already imported are never
+# touched again, so the destination stays safe to reorganize.
+cmd_import() {
+  local udid="$1" dst="${2:-}"
+  command -v rsync >/dev/null 2>&1 || die "rsync-missing"
+  [[ -n $dst ]] || die "bad-folder"
+  dst="${dst/#\~/$HOME}"
+  # Absolute and already-normalized: a ".." that canonicalizes at copy time
+  # is how an import lands somewhere the user never chose.
+  [[ $dst == /* ]] || die "bad-folder"
+  case "$dst" in */../* | */.. | *//* | */./* | */.) die "bad-folder" ;; esac
+
+  cmd_mount "$udid"
+  local mnt src
+  mnt=$(mount_point "$udid")
+  src="$mnt/DCIM"
+  [[ -d $src ]] || die "no-photos"
+  mkdir -p "$dst" || die "bad-folder"
+
+  # Measured on a real 13 GB roll: an original offloaded to iCloud ("Optimize
+  # iPhone Storage") reads as ENODATA, and that read error can take the whole
+  # AFC session down with it — rsync then aborts mid-run. So the copy runs in
+  # passes: each pass re-heals the mount, `--ignore-existing` makes re-runs
+  # cost nothing, and the loop stops the moment a pass copies nothing new — at
+  # which point every remaining failure is a permanent iCloud-only original.
+  local out rc n pass=0 copied=0 partial=0
+  while ((pass < 12)); do
+    pass=$((pass + 1))
+    ((pass > 1)) && cmd_mount "$udid"
+    out=$(rsync -rt --ignore-existing --stats "$src/" "$dst/" 2>&1)
+    rc=$?
+    n=$(printf '%s\n' "$out" | sed -n 's/^Number of regular files transferred: \([0-9,]*\).*/\1/p' | tr -d ,)
+    copied=$((copied + ${n:-0}))
+    ((rc == 0)) && break
+    partial=1
+    ((${n:-0} == 0)) && break
+  done
+  if ((rc != 0 && rc != 23 && rc != 24 && copied == 0)); then
+    die "$(printf '%s\n' "$out" | grep . | head -1)"
+  fi
+  printf 'imported\t%s\t%s\t%s\n' "$copied" "$(clip "$dst")" "$partial"
+}
+
+case "${1:-}" in
+  deps) cmd_deps ;;
+  fix-deps) cmd_fix_deps ;;
+  status) cmd_status "${2:-}" ;;
+  pair) cmd_pair "${2:-}" ;;
+  unpair) cmd_unpair "${2:-}" ;;
+  mount) cmd_mount "${2:-}" ;;
+  unmount) cmd_unmount "${2:-}" ;;
+  photos) cmd_photos "${2:-}" ;;
+  import) cmd_import "${2:-}" "${3:-}" ;;
+  *)
+    cat >&2 <<'USAGE'
+usage: iphone-ctl deps | fix-deps
+       iphone-ctl status [udid-filter]
+       iphone-ctl pair|unpair|mount|unmount|photos <udid>
+       iphone-ctl import <udid> <folder>
+USAGE
+    exit 2
+    ;;
+esac
