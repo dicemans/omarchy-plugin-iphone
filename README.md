@@ -64,6 +64,18 @@ The widget lands in the bar's right section. Move it with:
 omarchy bar move io.github.dicemans.iphone --section left
 ```
 
+## Removal
+
+```bash
+omarchy plugin remove io.github.dicemans.iphone
+```
+
+That deletes the plugin and drops its entry from your shell config. It leaves
+your imported photos exactly where they are, and it never touched your
+containers, contacts, or anything on the phone. The two packages it offered
+to install (`usbmuxd`, `ifuse`) stay unless you remove them yourself with
+`sudo pacman -Rns usbmuxd ifuse`.
+
 ## Keyboard & shortcuts
 
 With the panel focused: **arrows** move, **Enter** activates (or presses the
