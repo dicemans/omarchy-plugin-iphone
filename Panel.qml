@@ -41,6 +41,13 @@ Panel {
   property string importUdid: ""
   property string actionNotice: ""
 
+  // The import time-window menu: which device it belongs to (empty = closed),
+  // the counted sizes once they arrive, and the keyboard cursor within it.
+  property string importMenuUdid: ""
+  property var importPlan: null
+  property int importMenuIndex: 0
+  readonly property bool importMenuOpen: root.importMenuUdid !== ""
+
   property int selectedIndex: 0
   property int actionIndex: -1
   property bool cursorActive: false
@@ -91,6 +98,15 @@ Panel {
     if (!listProc.running) listProc.running = true
   }
 
+  // A USB udev event — a cable in or out — means the list is stale now, not
+  // in fifteen seconds. Plugging in fires a burst of events and usbmuxd
+  // needs a beat to enumerate the phone, so the burst is debounced into one
+  // refresh, and a second follows once things settle to catch the battery
+  // that was not readable yet on the first pass.
+  function onUsbEvent(line) {
+    if (/\b(add|remove|bind)\b/.test(String(line))) usbDebounce.restart()
+  }
+
   function applyStatus(raw) {
     rows = Model.parseStatus(raw)
     selectedIndex = Model.clampIndex(selectedIndex, rows.length)
@@ -128,8 +144,35 @@ Panel {
     // "Check again" is just a refresh wearing the row's clothes: the state
     // it waits on lives on the phone, not here.
     if (action === "retry") { refresh(); return "ok" }
-    if (action === "import") return runImport(row.udid)
+    // Import no longer copies straight away: it asks how far back to reach.
+    if (action === "import") { openImportMenu(row.udid); return "ok" }
     return run(row.udid, action)
+  }
+
+  // Ask how far back to import, and start counting what each window holds so
+  // the "All photos" row can show its size before it is chosen.
+  function openImportMenu(udid) {
+    if (!udid) return
+    if (importProc.running) return
+    importMenuUdid = udid
+    importPlan = null
+    importMenuIndex = 0
+    planProc.command = [root.helperPath, "import-plan", udid, root.importFolder]
+    if (!planProc.running) planProc.running = true
+  }
+
+  function closeImportMenu() {
+    importMenuUdid = ""
+    importPlan = null
+  }
+
+  function activateImportMenu() {
+    var windows = Model.IMPORT_WINDOWS
+    if (importMenuIndex < 0 || importMenuIndex >= windows.length) return
+    var udid = importMenuUdid
+    var win = windows[importMenuIndex].id
+    closeImportMenu()
+    runImport(udid, win)
   }
 
   function run(udid, action) {
@@ -144,15 +187,29 @@ Panel {
 
   }
 
-  function runImport(udid) {
+  function runImport(udid, window) {
     if (!udid) return "no action"
     if (importProc.running) return "busy"
     actionError = ""
     actionNotice = ""
     importUdid = udid
-    importProc.command = [root.helperPath, "import", udid, root.importFolder]
+    importProc.command = [root.helperPath, "import", udid, root.importFolder, window || "all"]
     importProc.running = true
     return "ok"
+  }
+
+  // A fire-and-forget desktop notification when an import finishes. --exec
+  // makes the notification open the folder when clicked, so the photos are
+  // one tap away from where they landed.
+  function notifyImport(result) {
+    if (!result || !result.folder) return
+    Quickshell.execDetached([
+      "omarchy-notification-send",
+      "-g", Model.GLYPH.import,
+      "iPhone photos imported",
+      Model.importNotifyBody(result),
+      "--exec", "xdg-open", result.folder
+    ])
   }
 
   // The setup repair goes through polkit, so the click may be answered by a
@@ -218,13 +275,32 @@ Panel {
     id: importProc
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.actionNotice = Model.importNotice(Model.parseImport(text))
+      onStreamFinished: {
+        var result = Model.parseImport(text)
+        root.actionNotice = Model.importNotice(result)
+        // A long import finishes while the user is looking elsewhere, so it
+        // says so on the desktop: how many, how long, and where — clicking
+        // the notification opens the folder. Nothing new gets no popup, only
+        // the quiet panel line, so a no-op import is not a distraction.
+        if (result && result.count > 0) root.notifyImport(result)
+      }
     }
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: root.actionError = Model.clipDiag(text) }
     onExited: {
       root.importUdid = ""
       root.refresh()
     }
+  }
+
+  // Counts what each import window holds. Its result only decorates the menu,
+  // so a failure is silent — the rows just stay without their sizes.
+  Process {
+    id: planProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (root.importMenuOpen) root.importPlan = Model.parseImportPlan(text)
+    }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: {} }
   }
 
   Process {
@@ -236,8 +312,36 @@ Panel {
     }
   }
 
-  // One timer for both states: fresh rows every few seconds while the panel
-  // is open, a slow heartbeat while it is closed — polling wakes the phone.
+  // Watch the USB bus for the widget's whole life, so a cable plugged or
+  // pulled shows immediately — battery in the bar within seconds, panel open
+  // or closed — instead of waiting for the next poll. One idle netlink
+  // listener costs nothing, and running it always means the bar badge is
+  // right the moment you plug in, not up to a minute later.
+  Process {
+    id: usbMonitor
+    running: true
+    command: ["stdbuf", "-oL", "udevadm", "monitor", "--udev", "--subsystem-match=usb"]
+    stdout: SplitParser { onRead: function (line) { root.onUsbEvent(line) } }
+  }
+
+  // Collapse the plug-in event storm into one refresh, then a second pass a
+  // couple of seconds later for the battery that needs usbmuxd fully up.
+  Timer {
+    id: usbDebounce
+    interval: 1200
+    repeat: false
+    onTriggered: { root.refresh(); usbSettle.restart() }
+  }
+  Timer {
+    id: usbSettle
+    interval: 2500
+    repeat: false
+    onTriggered: root.refresh()
+  }
+
+  // The periodic heartbeat: keeps battery current while open, and the bar's
+  // badge roughly right while closed. Presence itself is event-driven now,
+  // so this can stay gentle — polling briefly wakes the phone.
   Timer {
     interval: (root.opened ? root.refreshIntervalSec : Math.max(root.refreshIntervalSec, 60)) * 1000
     running: true
@@ -261,7 +365,7 @@ Panel {
   }
 
   onOpenedChanged: {
-    if (!opened) return
+    if (!opened) { closeImportMenu(); return }
     refresh()
     cursorActive = false
     selectedIndex = Model.clampIndex(selectedIndex, rows.length)
@@ -300,21 +404,39 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight)
+    // The import menu is drawn inside the panel, so the panel must be tall
+    // enough to hold it even when the list behind is short.
+    contentHeight: panel.fittedContentHeight(
+      root.importMenuOpen ? Math.max(column.implicitHeight, Style.space(280)) : column.implicitHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onMoveRequested: function (dx, dy) { root.moveCursor(dx, dy) }
-      onActivateRequested: root.activateCursor()
-      onCloseRequested: root.close()
+      onMoveRequested: function (dx, dy) {
+        // While the import menu is up it owns the keys: up/down walk its
+        // rows, nothing reaches the device list behind it.
+        if (root.importMenuOpen) {
+          if (dy !== 0) root.importMenuIndex = Model.clampIndex(root.importMenuIndex + dy, Model.IMPORT_WINDOWS.length)
+          return
+        }
+        root.moveCursor(dx, dy)
+      }
+      onActivateRequested: {
+        if (root.importMenuOpen) root.activateImportMenu()
+        else root.activateCursor()
+      }
+      onCloseRequested: {
+        if (root.importMenuOpen) root.closeImportMenu()
+        else root.close()
+      }
       onTextKey: function (key) {
+        if (root.importMenuOpen) return
         if (key === "r") { root.refresh(); return }
         var row = root.rowAt(root.selectedIndex)
         if (!row || !root.cursorActive) return
         if (key === "p" && row.paired) root.activate(row, "photos")
       }
-      onTabRequested: function (direction) { root.switchPanel(direction) }
+      onTabRequested: function (direction) { if (!root.importMenuOpen) root.switchPanel(direction) }
 
       Column {
         id: column
@@ -484,6 +606,104 @@ Panel {
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
+        }
+      }
+
+      // ---------- Import time-window menu ----------
+      // Drawn over the list, like a dialog: pick how far back to reach, and
+      // "All photos" carries the size and time the smaller windows do not
+      // need. Sizes fill in when the count returns; until then, an ellipsis.
+      Rectangle {
+        id: importMenu
+        anchors.fill: parent
+        z: 20
+        visible: root.importMenuOpen
+        color: Util.alpha(root.bar ? root.bar.background : Color.background, 0.78)
+
+        MouseArea { anchors.fill: parent; onClicked: root.closeImportMenu() }
+
+        BorderSurface {
+          width: Math.min(parent.width - Style.space(24), Style.space(340))
+          height: menuCol.implicitHeight + Style.space(24)
+          anchors.centerIn: parent
+          clip: true
+          color: root.bar ? root.bar.background : Color.background
+          borderSpec: Border.flat(Color.accent, Style.normalBorderWidth)
+          radius: Style.cornerRadius
+
+          MouseArea { anchors.fill: parent; onClicked: {} }
+
+          Column {
+            id: menuCol
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.space(12)
+            spacing: Style.space(3)
+
+            Text {
+              text: "Import photos"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
+              bottomPadding: Style.space(4)
+            }
+
+            Repeater {
+              model: Model.IMPORT_WINDOWS
+
+              CursorSurface {
+                id: menuRow
+                required property var modelData
+                required property int index
+
+                width: menuCol.width
+                implicitHeight: menuText.implicitHeight + Style.space(12)
+                hasCursor: root.importMenuIndex === index
+                foreground: root.bar.foreground
+                fill: root.hoverFill
+
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onContainsMouseChanged: if (containsMouse) root.importMenuIndex = menuRow.index
+                  onClicked: { root.importMenuIndex = menuRow.index; root.activateImportMenu() }
+                }
+
+                Column {
+                  id: menuText
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(8)
+                  anchors.rightMargin: Style.space(8)
+                  spacing: Style.space(1)
+
+                  Text {
+                    text: menuRow.modelData.label
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.body
+                    width: parent.width
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    text: root.importPlan
+                      ? Model.importWindowSummary(menuRow.modelData.id, root.importPlan)
+                      : "…"
+                    color: Qt.darker(root.bar.foreground, 1.5)
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    width: parent.width
+                    elide: Text.ElideRight
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }

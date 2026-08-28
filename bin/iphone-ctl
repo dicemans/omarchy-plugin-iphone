@@ -295,18 +295,39 @@ cmd_photos() {
   launch_detached xdg-open "$target"
 }
 
-# Copy what is new in the camera roll into a folder of the user's choice.
-# `--ignore-existing` is the contract: photos already imported are never
-# touched again, so the destination stays safe to reorganize.
-cmd_import() {
-  local udid="$1" dst="${2:-}"
-  command -v rsync >/dev/null 2>&1 || die "rsync-missing"
+# A DCIM path validated for a destination folder, shared by import and its
+# preview. Absolute and already-normalized: a ".." that canonicalizes at copy
+# time is how an import lands somewhere the user never chose.
+import_dst() {
+  local dst="$1"
   [[ -n $dst ]] || die "bad-folder"
   dst="${dst/#\~/$HOME}"
-  # Absolute and already-normalized: a ".." that canonicalizes at copy time
-  # is how an import lands somewhere the user never chose.
   [[ $dst == /* ]] || die "bad-folder"
   case "$dst" in */../* | */.. | *//* | */./* | */.) die "bad-folder" ;; esac
+  printf '%s' "$dst"
+}
+
+# `find` age flags for a time window. Empty for "all".
+window_flags() {
+  case "$1" in
+    5min) printf '%s\n' -mmin -5 ;;
+    24h)  printf '%s\n' -mmin -1440 ;;
+    7d)   printf '%s\n' -mmin -10080 ;;
+    all)  ;;
+    *) return 1 ;;
+  esac
+}
+
+# Copy what is new in the camera roll — within a time window — into a folder
+# of the user's choice. `--ignore-existing` is the contract: photos already
+# imported are never touched again, so the destination stays safe to
+# reorganize. window is 5min | 24h | 7d | all.
+cmd_import() {
+  local udid="$1" dst="${2:-}" window="${3:-all}"
+  command -v rsync >/dev/null 2>&1 || die "rsync-missing"
+  dst=$(import_dst "$dst") || exit 1
+  local -a wf
+  mapfile -t wf < <(window_flags "$window") || die "bad-window"
 
   cmd_mount "$udid"
   local mnt src
@@ -318,14 +339,17 @@ cmd_import() {
   # Measured on a real 13 GB roll: an original offloaded to iCloud ("Optimize
   # iPhone Storage") reads as ENODATA, and that read error can take the whole
   # AFC session down with it — rsync then aborts mid-run. So the copy runs in
-  # passes: each pass re-heals the mount, `--ignore-existing` makes re-runs
-  # cost nothing, and the loop stops the moment a pass copies nothing new — at
-  # which point every remaining failure is a permanent iCloud-only original.
-  local out rc n pass=0 copied=0 partial=0
+  # passes: each pass re-heals the mount, re-selects the windowed file list,
+  # `--ignore-existing` makes re-runs cost nothing, and the loop stops the
+  # moment a pass copies nothing new — at which point every remaining failure
+  # is a permanent iCloud-only original.
+  local out rc=0 n pass=0 copied=0 partial=0 list start=$SECONDS
   while ((pass < 12)); do
     pass=$((pass + 1))
     ((pass > 1)) && cmd_mount "$udid"
-    out=$(rsync -rt --ignore-existing --stats "$src/" "$dst/" 2>&1)
+    list=$( cd "$src" 2>/dev/null && find . -type f "${wf[@]}" -printf '%P\n' 2>/dev/null | head -n 100000 )
+    [[ -n $list ]] || break
+    out=$(printf '%s\n' "$list" | rsync -rt --ignore-existing --stats --files-from=- "$src/" "$dst/" 2>&1)
     rc=$?
     n=$(printf '%s\n' "$out" | sed -n 's/^Number of regular files transferred: \([0-9,]*\).*/\1/p' | tr -d ,)
     copied=$((copied + ${n:-0}))
@@ -336,7 +360,46 @@ cmd_import() {
   if ((rc != 0 && rc != 23 && rc != 24 && copied == 0)); then
     die "$(printf '%s\n' "$out" | grep . | head -1)"
   fi
-  printf 'imported\t%s\t%s\t%s\n' "$copied" "$(clip "$dst")" "$partial"
+  printf 'imported\t%s\t%s\t%s\t%s\n' "$copied" "$(clip "$dst")" "$partial" "$((SECONDS - start))"
+}
+
+# What each window would import, so the menu can size a choice before it is
+# made. Every figure means the same thing — files not already in the folder,
+# i.e. the real download — so the windows are always a subset of "all" and
+# never read as larger than it. One rsync dry-run lists exactly those files
+# with their size and mtime; awk buckets them by age.
+#   plan \t c5 \t b5 \t c24 \t b24 \t c7 \t b7 \t all-count \t all-bytes
+cmd_import_plan() {
+  local udid="$1" dst="${2:-}"
+  command -v rsync >/dev/null 2>&1 || die "rsync-missing"
+  dst=$(import_dst "$dst") || exit 1
+  cmd_mount "$udid"
+  local mnt src
+  mnt=$(mount_point "$udid")
+  src="$mnt/DCIM"
+  [[ -d $src ]] || die "no-photos"
+  mkdir -p "$dst" 2>/dev/null
+
+  local now
+  now=$(date +%s)
+  # %l size, %M mtime (YYYY/MM/DD-HH:MM:SS, local time), %n name. Directory
+  # entries end in "/" and are skipped; mktime reads local time, as does the
+  # `now` above, so the difference is a real age in seconds.
+  rsync -rt --ignore-existing --dry-run --out-format='%l|%M|%n' "$src/" "$dst/" 2>/dev/null \
+    | head -n 200000 \
+    | awk -F'|' -v now="$now" '
+        $3 ~ /\/$/ { next }
+        {
+          size = $1 + 0
+          dt = $2; gsub(/[\/:-]/, " ", dt)
+          age = now - mktime(dt)
+          allc++; allb += size
+          if (age <= 300)    { c5++;  b5  += size }
+          if (age <= 86400)  { c24++; b24 += size }
+          if (age <= 604800) { c7++;  b7  += size }
+        }
+        END { printf "plan\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
+                     c5+0,b5+0,c24+0,b24+0,c7+0,b7+0,allc+0,allb+0 }'
 }
 
 case "${1:-}" in
@@ -348,13 +411,15 @@ case "${1:-}" in
   mount) cmd_mount "${2:-}" ;;
   unmount) cmd_unmount "${2:-}" ;;
   photos) cmd_photos "${2:-}" ;;
-  import) cmd_import "${2:-}" "${3:-}" ;;
+  import) cmd_import "${2:-}" "${3:-}" "${4:-}" ;;
+  import-plan) cmd_import_plan "${2:-}" "${3:-}" ;;
   *)
     cat >&2 <<'USAGE'
 usage: iphone-ctl deps | fix-deps
        iphone-ctl status [udid-filter]
        iphone-ctl pair|unpair|mount|unmount|photos <udid>
-       iphone-ctl import <udid> <folder>
+       iphone-ctl import <udid> <folder> [5min|24h|7d|all]
+       iphone-ctl import-plan <udid> <folder>
 USAGE
     exit 2
     ;;

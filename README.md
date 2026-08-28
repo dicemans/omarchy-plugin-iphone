@@ -1,50 +1,56 @@
 # iPhone
 
-Your iPhone on the Omarchy bar: presence and battery at a glance, guided
-pairing — trust dialog included — and your camera roll one click away in the
-file manager or copied to a folder. Over the USB cable, no jailbreak, no app
-on the phone.
+Your iPhone on the Omarchy bar. Plug it in over USB and you get its battery
+at a glance and your camera roll one click away — browse it in your file
+manager, or import new photos to a folder on your computer. No jailbreak, no
+app on the phone.
 
-![The panel in the Omarchy bar](preview.png)
+![The iPhone panel in the Omarchy bar](preview.png)
 
 ## What it does
 
-- **Detects your iPhone over USB** and shows it in the bar; battery
-  percentage next to the glyph once paired.
-- **One-click setup**: missing system pieces (`usbmuxd`, `ifuse`) are
-  installed from the official repos and activated behind a **single** polkit
-  authorization — the already-plugged phone is picked up without re-plugging
-  the cable.
-- **Guided pairing**: every stop of the pairing conversation is a state with
-  its own next step, never a bare error — "Unlock the iPhone and tap Trust",
-  "Enter the passcode", "Trust was declined — ask again".
-- **Open camera roll**: mounts the phone user-space (`ifuse`, no root) and
-  opens `DCIM` in your file manager, which already knows how to thumbnail
-  HEIC. Eject from the same row.
-- **Import new photos**: one click copies the camera roll into a folder of
-  your choice (`~/Pictures/iPhone` by default) — only what is not already
-  there, so the folder stays safe to reorganize. It runs in passes and
-  heals a dropped connection on the way, and it tells you when some items
-  live only in iCloud and could not be copied.
+- **Battery in the bar.** Once your iPhone is paired, its charge shows next
+  to the bar icon — glance and go.
+- **One-click setup.** The first time, the panel offers to install the two
+  system pieces it needs (`usbmuxd`, `ifuse`) and start them, behind a single
+  password prompt. Nothing to configure by hand.
+- **Guided pairing.** Plug in, press **Pair**, and the panel walks you
+  through it — "Unlock the iPhone and tap Trust", "Enter the passcode" — in
+  plain words, never a cryptic error.
+- **Open the camera roll.** One click mounts the phone and opens its photos
+  (`DCIM`) in your file manager, which already knows how to show HEIC. Eject
+  from the same row when you're done.
+- **Import photos, your way.** Clicking import asks how far back to reach —
+  the last 5 minutes, 24 hours, 7 days, or everything — and for **All photos**
+  it shows the size and rough time before you commit. It copies only what
+  isn't already there, so your folder stays safe to reorganize.
 
-## Why USB only
+![Choosing how far back to import](import-menu.png)
 
-An iPhone deliberately does not let a generic Linux computer read its data
-over WiFi or Bluetooth the way a Mac does: WiFi presence needs the phone
-awake and carries no data on the stock stack, and Bluetooth PBAP (contacts,
-call history) is refused to anything that is not a car kit. Both were tried
-and dropped rather than shipped as buttons that disappoint. The cable does
-the things that actually work well, first try.
+When an import finishes, a desktop notification tells you how many photos
+synced, how long it took, and where they landed — click it to open the
+folder.
+
+## First time: three steps
+
+1. **Add the widget** (see Install), open its panel, and plug your iPhone in
+   with a USB cable.
+2. If the panel shows a **Set up iPhone support** button, click it once and
+   enter your password — it installs and starts what's needed.
+3. Press **Pair**, then on the iPhone tap **Trust** and enter your passcode.
+   That's it — battery appears in the bar and the photo buttons light up.
+
+Pairing is a one-time thing; after that, plugging in just works.
 
 ## Requirements
 
 | Dependency | Needed for | Notes |
 |---|---|---|
-| `libimobiledevice` | everything | Usually already installed. |
-| `usbmuxd` | talking to the phone | The panel offers to install and start it. |
-| `ifuse` | mounting the camera roll | The panel offers to install it. |
+| `libimobiledevice` | talking to the iPhone | Usually already installed. |
+| `usbmuxd` | the USB connection | The panel installs and starts it for you. |
+| `ifuse` | opening the camera roll | The panel installs it for you. |
 | `rsync` | importing photos | Present on most systems. |
-| `xdg-open` | opening DCIM | Present on any desktop. |
+| `xdg-open` | opening folders | Present on any desktop. |
 
 ## Install
 
@@ -52,11 +58,19 @@ the things that actually work well, first try.
 omarchy plugin add https://github.com/dicemans/omarchy-plugin-iphone.git --enable
 ```
 
-## Keyboard and IPC
+The widget lands in the bar's right section. Move it with:
 
-Arrows move, `Enter` activates (or presses the setup button while setup is
-needed), `p` opens photos on the selected device, `r` refreshes, `Esc`
-closes. Scriptable:
+```bash
+omarchy bar move io.github.dicemans.iphone --section left
+```
+
+## Keyboard & shortcuts
+
+With the panel focused: **arrows** move, **Enter** activates (or presses the
+setup button), **p** opens photos on the selected device, **r** refreshes,
+**Esc** closes. In the import menu, up/down pick a window and Enter starts it.
+
+Every action is scriptable, so you can bind it to a key:
 
 ```bash
 omarchy-shell io.github.dicemans.iphone toggle
@@ -65,36 +79,38 @@ omarchy-shell io.github.dicemans.iphone openPhotos   # first paired device
 
 ## Settings
 
-Set these on the widget's entry in `~/.config/omarchy/shell.json`, or through
-Setup → Plugins.
+Through **Setup → Plugins**, or on the widget's entry in
+`~/.config/omarchy/shell.json`:
 
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `refreshIntervalSec` | `15` | How often the device list and battery refresh while the panel is open. Kept high: each poll briefly wakes the phone. |
-| `showBattery` | `true` | Paint the phone's battery percentage next to the bar glyph. |
-| `preferredUdid` | `""` | With several iPhones around, list only the one whose UDID contains this text. |
-| `importFolder` | `~/Pictures/iPhone` | Where "Import new photos" copies the camera roll. |
+| Setting | Default | Meaning |
+|---|---|---|
+| Refresh interval | `15` s | How often battery refreshes while the panel is open. |
+| Show battery in the bar | on | Paint the phone's charge next to the bar icon. |
+| Only show this device | — | With several iPhones, list only the one whose UDID contains this text. |
+| Import photos into | `~/Pictures/iPhone` | Where "Import photos" copies the camera roll. |
+
+## Why USB only
+
+An iPhone doesn't let a Linux computer read its data over WiFi or Bluetooth
+the way a Mac does — Apple keeps that for its own devices. WiFi shows only
+presence (and only while the phone is awake), and Bluetooth won't hand a
+computer your contacts. Rather than ship buttons that disappoint, this plugin
+sticks to the cable, which does the useful things reliably, first try.
 
 ## Privacy & security
 
-- Mounts live under `$XDG_RUNTIME_DIR` (tmpfs): gone at logout, never
-  world-readable.
-- The only privileged path is the setup button — package install plus
-  usbmuxd activation, one pkexec, declared in the tooltip before you click.
-  Mounting itself is user-space FUSE and needs no elevation.
-- Device identifiers are validated before they ever reach a command line.
+- The phone is mounted in a temporary, per-user location that's wiped when
+  you log out and is never readable by other users.
+- The only thing that ever asks for your password is the one-time setup
+  (installing the two packages); its tooltip says exactly what it will do
+  before you click. Browsing and importing photos need no elevation.
+- Your photos are only ever copied where you choose; nothing is uploaded
+  anywhere.
 
-## Layout
+## Troubleshooting
 
-```
-manifest.json      plugin manifest (bar-widget, settings schema)
-Panel.qml          bar button + panel (thin renderer)
-Model.js           parsing and per-state action rules, no QML types
-bin/iphone-ctl     every libimobiledevice call, mount, and launch
-```
-
-`bin/iphone-ctl` is a plain script and the place to look when something
-misbehaves — run it in a terminal:
+`bin/iphone-ctl` is a plain script — run it in a terminal to see what's going
+on:
 
 ```bash
 ~/.config/omarchy/plugins/io.github.dicemans.iphone/bin/iphone-ctl deps

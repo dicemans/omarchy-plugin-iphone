@@ -111,7 +111,7 @@ function rowActions(row) {
   if (rules.photos)
     actions.push({ id: "photos", icon: GLYPH.photos, tooltip: "Open camera roll (DCIM)", urgent: false })
   if (rules.photos)
-    actions.push({ id: "import", icon: GLYPH.import, tooltip: "Import new photos — copies only what is not already there", urgent: false })
+    actions.push({ id: "import", icon: GLYPH.import, tooltip: "Import photos to this computer — choose how far back", urgent: false })
   if (rules.photos && row.mounted)
     actions.push({ id: "unmount", icon: GLYPH.eject, tooltip: "Eject (unmount)", urgent: true })
   if (rules.pair)
@@ -121,12 +121,37 @@ function rowActions(row) {
   return actions
 }
 
-// "imported \t N \t folder \t partial" from the import command.
+// "imported \t N \t folder \t partial \t elapsed-seconds" from the import.
 function parseImport(raw) {
   var f = String(raw || "").slice(0, MAX_INPUT).trim().split("\t")
   if (f.length < 3 || f[0] !== "imported") return null
   var n = parseInt(f[1], 10)
-  return { count: isNaN(n) ? 0 : n, folder: clip(f[2]), partial: f[3] === "1" }
+  var s = parseInt(f[4], 10)
+  return {
+    count: isNaN(n) ? 0 : n,
+    folder: clip(f[2]),
+    partial: f[3] === "1",
+    seconds: isNaN(s) ? 0 : Math.max(0, s)
+  }
+}
+
+// Seconds as a person would say them: "45 s", "3 min 12 s", "1 h 8 min".
+function elapsedText(seconds) {
+  seconds = Math.max(0, Math.round(Number(seconds) || 0))
+  if (seconds < 60) return seconds + " s"
+  var m = Math.floor(seconds / 60), s = seconds % 60
+  if (m < 60) return s > 0 ? m + " min " + s + " s" : m + " min"
+  var h = Math.floor(m / 60); m = m % 60
+  return m > 0 ? h + " h " + m + " min" : h + " h"
+}
+
+// The body of the "import finished" desktop notification: what synced, how
+// long it took, and where the files landed.
+function importNotifyBody(result) {
+  if (!result) return ""
+  var text = countPhotos(result.count) + " in " + elapsedText(result.seconds) + "\n" + result.folder
+  if (result.partial) text += "\nSome items live only in iCloud and were skipped."
+  return text
 }
 
 function importNotice(result) {
@@ -138,6 +163,70 @@ function importNotice(result) {
   // name the cause, or the user will re-click forever chasing them.
   if (result.partial) text += " · some items live only in iCloud and were skipped"
   return text
+}
+
+// The import menu: pick how far back to reach. Newest windows first, "all"
+// last where it carries a size the others do not need.
+var IMPORT_WINDOWS = [
+  { id: "5min", label: "Last 5 minutes" },
+  { id: "24h",  label: "Last 24 hours" },
+  { id: "7d",   label: "Last 7 days" },
+  { id: "all",  label: "All photos" }
+]
+
+// Roughly what AFC-over-USB moves on this class of phone; only ever used to
+// turn a byte count into "~N min", so approximate is the point.
+var IMPORT_MBPS = 30
+
+function planNumber(value) {
+  var n = parseInt(value, 10)
+  return isNaN(n) ? 0 : Math.max(0, n)
+}
+
+// "plan \t c5 \t b5 \t c24 \t b24 \t c7 \t b7 \t all-count \t all-bytes"
+// Every window carries a count and bytes, all meaning "not already imported",
+// so a window is always a subset of "all".
+function parseImportPlan(raw) {
+  var f = String(raw || "").slice(0, MAX_INPUT).trim().split("\t")
+  if (f.length < 9 || f[0] !== "plan") return null
+  return {
+    "5min": { count: planNumber(f[1]), bytes: planNumber(f[2]) },
+    "24h": { count: planNumber(f[3]), bytes: planNumber(f[4]) },
+    "7d": { count: planNumber(f[5]), bytes: planNumber(f[6]) },
+    all: { count: planNumber(f[7]), bytes: planNumber(f[8]) }
+  }
+}
+
+function humanSize(bytes) {
+  bytes = Number(bytes) || 0
+  if (bytes < 1024) return bytes + " B"
+  var units = ["KB", "MB", "GB", "TB"], i = -1, v = bytes
+  do { v /= 1024; i++ } while (v >= 1024 && i < units.length - 1)
+  return (v >= 10 ? Math.round(v) : Math.round(v * 10) / 10) + " " + units[i]
+}
+
+function estimateText(bytes) {
+  var secs = (Number(bytes) || 0) / (IMPORT_MBPS * 1024 * 1024)
+  if (secs < 45) return "under a minute"
+  if (secs < 5400) return "~" + Math.max(1, Math.round(secs / 60)) + " min"
+  return "~" + Math.round(secs / 3600) + " h"
+}
+
+function countPhotos(n) {
+  return n + (n === 1 ? " photo" : " photos")
+}
+
+// The second line under each menu row: a count for the recent windows, and
+// count · size · time for "all", where the download is worth sizing up. Null
+// plan means "still counting", which the panel shows as an ellipsis.
+function importWindowSummary(win, plan) {
+  if (!plan) return ""
+  if (win === "all") {
+    if (plan.all.count === 0) return "nothing new to import"
+    return countPhotos(plan.all.count) + " · " + humanSize(plan.all.bytes) + " · " + estimateText(plan.all.bytes)
+  }
+  var c = plan[win] ? plan[win].count : 0
+  return c === 0 ? "none" : countPhotos(c)
 }
 
 // The second line under the device name: what to DO next.
@@ -240,6 +329,13 @@ if (typeof module !== "undefined") {
     rowActions: rowActions,
     parseImport: parseImport,
     importNotice: importNotice,
+    elapsedText: elapsedText,
+    importNotifyBody: importNotifyBody,
+    IMPORT_WINDOWS: IMPORT_WINDOWS,
+    parseImportPlan: parseImportPlan,
+    humanSize: humanSize,
+    estimateText: estimateText,
+    importWindowSummary: importWindowSummary,
     stateText: stateText,
     busyLabel: busyLabel,
     summary: summary,

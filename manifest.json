@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.dicemans.iphone",
   "name": "iPhone",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "author": "Paolo Pellicori",
   "license": "MIT",
   "description": "Your iPhone on the bar: presence and battery at a glance, guided pairing (trust dialog included), and your camera roll one click away in the file manager. No jailbreak, no app on the phone.",
