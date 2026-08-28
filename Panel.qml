@@ -451,6 +451,7 @@ Panel {
           implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight)
 
           Text {
+            textFormat: Text.PlainText
             id: heroIcon
             text: Model.GLYPH.phone
             color: root.bar.foreground
@@ -469,6 +470,7 @@ Panel {
             spacing: Style.space(2)
 
             Text {
+              textFormat: Text.PlainText
               text: "iPhone"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
@@ -479,6 +481,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               text: (root.listError !== "" ? Model.errorText(root.listError) : Model.heroSubtitle(root.rows)).toUpperCase()
               color: root.listError !== "" ? root.bar.urgent : Qt.darker(root.bar.foreground, 1.4)
               font.family: root.bar.fontFamily
@@ -500,6 +503,7 @@ Panel {
           visible: root.depsBroken
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: Model.depsText(root.brokenDeps)
             color: root.bar.foreground
@@ -524,6 +528,7 @@ Panel {
               spacing: Style.space(8)
 
               Text {
+                textFormat: Text.PlainText
                 text: Model.GLYPH.fix
                 color: fixButton.tone
                 font.family: root.bar.fontFamily
@@ -532,6 +537,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 text: root.fixBusy ? "Setting up…" : "Set up iPhone support"
                 color: root.fixBusy ? Qt.darker(root.bar.foreground, 1.4) : root.bar.foreground
                 font.family: root.bar.fontFamily
@@ -564,6 +570,7 @@ Panel {
 
         // ---------- Empty / error state ----------
         Text {
+          textFormat: Text.PlainText
           visible: !root.depsBroken && root.stateMessage !== ""
           width: parent.width
           text: root.stateMessage
@@ -588,6 +595,7 @@ Panel {
 
         // ---------- Last action failure ----------
         Text {
+          textFormat: Text.PlainText
           visible: root.actionError !== ""
           width: parent.width
           text: Model.errorText(root.actionError)
@@ -599,6 +607,7 @@ Panel {
 
         // ---------- Good news (import result) ----------
         Text {
+          textFormat: Text.PlainText
           visible: root.actionNotice !== ""
           width: parent.width
           text: root.actionNotice
@@ -642,6 +651,7 @@ Panel {
             spacing: Style.space(3)
 
             Text {
+              textFormat: Text.PlainText
               text: "Import photos"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
@@ -682,6 +692,7 @@ Panel {
                   spacing: Style.space(1)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: menuRow.modelData.label
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -691,6 +702,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     text: root.importPlan
                       ? Model.importWindowSummary(menuRow.modelData.id, root.importPlan)
                       : "…"
@@ -748,6 +760,7 @@ Panel {
       implicitHeight: Math.max(rowIcon.implicitHeight, rowInfo.implicitHeight, rowActions.implicitHeight)
 
       Text {
+        textFormat: Text.PlainText
         id: rowIcon
         text: Model.GLYPH.phone
         color: rowItem.attention
@@ -771,6 +784,7 @@ Panel {
         anchors.verticalCenter: parent.verticalCenter
 
         Text {
+          textFormat: Text.PlainText
           text: rowItem.row ? rowItem.row.name : ""
           color: root.bar.foreground
           font.family: root.bar.fontFamily
@@ -780,6 +794,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           text: rowItem.busy !== "" ? Model.busyLabel(rowItem.busy) : Model.stateText(rowItem.row)
           color: rowItem.busy !== ""
             ? root.bar.foreground

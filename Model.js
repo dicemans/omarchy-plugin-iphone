@@ -10,12 +10,19 @@ var MAX_ROWS = 16        // devices kept
 var MAX_FIELD = 256      // characters kept per field
 var MAX_DIAG = 400       // characters of diagnostic text kept
 
+// Neutralize markup as well as bound length: device- and tool-supplied
+// strings flow to a Qt Text and the bar tooltip, both in AutoText mode, and
+// must never be interpreted as rich text or a resource reference.
+function stripMarkup(value) {
+  return String(value === undefined || value === null ? "" : value).replace(/[<>&]/g, "")
+}
+
 function clip(value) {
-  return String(value === undefined || value === null ? "" : value).slice(0, MAX_FIELD)
+  return stripMarkup(value).slice(0, MAX_FIELD)
 }
 
 function clipDiag(value) {
-  return String(value === undefined || value === null ? "" : value).trim().slice(0, MAX_DIAG)
+  return stripMarkup(value).trim().slice(0, MAX_DIAG)
 }
 
 var GLYPH = {

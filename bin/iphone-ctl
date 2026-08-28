@@ -27,12 +27,17 @@ MAX_ROWS=16        # devices listed (nobody owns 17 iPhones)
 MAX_BYTES=65536    # bytes accepted from any single invocation
 MAX_FIELD=256      # characters kept per field
 MAX_DIAG=400       # characters of diagnostic text ever printed
+MAX_STREAM=16777216 # bytes read from a bulk listing (the photo-plan scan)
 
 # Mounts are per-user and per-device, on tmpfs, gone at logout.
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 clip() {
+  # Strip the field/line separators the TSV relies on, and the markup
+  # characters that a Qt Text or tooltip in AutoText mode would interpret
+  # instead of showing literally — a device name is attacker-influenced.
   local value="${1//[$'\t\n\r']/ }"
+  value="${value//[<>&]/}"
   printf '%s' "${value:0:MAX_FIELD}"
 }
 
@@ -141,7 +146,7 @@ cmd_fix_deps() {
 # holding the phone, and each of its stops has its own next step.
 pair_state() {
   local udid="$1" out
-  out=$(idevicepair -u "$udid" validate 2>&1)
+  out=$(idevicepair -u "$udid" validate 2>&1 | head -c "$MAX_DIAG")
   out=${out,,}
   case "$out" in
     *success*) echo paired ;;
@@ -158,7 +163,9 @@ device_info() {
   local -a args=(-u "$udid")
   [[ -n $domain ]] && args+=(-q "$domain")
   args+=(-k "$key")
-  ideviceinfo "${args[@]}" 2>/dev/null | head -1
+  # Cap the bytes as they are read, not after: a malformed device could
+  # answer with an unbounded value.
+  ideviceinfo "${args[@]}" 2>/dev/null | head -c "$MAX_FIELD" | head -1
 }
 
 # A FUSE mount can outlive its AFC session (a heavy copy, a re-lock) and then
@@ -222,7 +229,7 @@ cmd_pair() {
   [[ -n $udid ]] || die "no-device"
   valid_udid "$udid" || die "no-device"
   local out
-  out=$(idevicepair -u "$udid" pair 2>&1)
+  out=$(idevicepair -u "$udid" pair 2>&1 | head -c "$MAX_DIAG")
   case "${out,,}" in
     *success*) return 0 ;;
     *denied*) die "pair-denied" ;;
@@ -261,7 +268,7 @@ cmd_mount() {
   # ifuse says exactly why it refused — a locked phone, most often, right
   # after pairing.
   local err
-  if ! err=$(ifuse -u "$udid" "$mnt" 2>&1 >/dev/null); then
+  if ! err=$(ifuse -u "$udid" "$mnt" 2>&1 >/dev/null | head -c "$MAX_DIAG"); then
     rmdir "$mnt" 2>/dev/null
     case "${err,,}" in
       *password* | *locked*) die "device-locked" ;;
@@ -351,13 +358,20 @@ cmd_import() {
   # `--ignore-existing` makes re-runs cost nothing, and the loop stops the
   # moment a pass copies nothing new — at which point every remaining failure
   # is a permanent iCloud-only original.
-  local out rc=0 n pass=0 copied=0 partial=0 list start=$SECONDS
+  local out rc=0 n pass=0 copied=0 partial=0 start=$SECONDS
   while ((pass < 12)); do
     pass=$((pass + 1))
     ((pass > 1)) && cmd_mount "$udid"
-    list=$( cd "$src" 2>/dev/null && find . -type f "${wf[@]}" -printf '%P\n' 2>/dev/null | head -n 100000 )
-    [[ -n $list ]] || break
-    out=$(printf '%s\n' "$list" | rsync -rt --ignore-existing --stats --files-from=- "$src/" "$dst/" 2>&1)
+    # Stream the file list straight into rsync rather than buffering it in a
+    # shell variable — a roll with very many entries would otherwise be held
+    # whole in memory. rsync's own output is the small --stats block; cap it
+    # anyway. pipefail makes the pipeline carry rsync's exit code (23/24 =
+    # some files unreadable, the iCloud-only case). An empty window yields no
+    # input, rsync transfers nothing, and the loop ends on the first pass.
+    out=$( { cd "$src" 2>/dev/null && find . -type f "${wf[@]}" -printf '%P\n' 2>/dev/null; } \
+      | head -n 100000 \
+      | rsync -rt --ignore-existing --stats --files-from=- "$src/" "$dst/" 2>&1 \
+      | head -c "$MAX_BYTES" )
     rc=$?
     n=$(printf '%s\n' "$out" | sed -n 's/^Number of regular files transferred: \([0-9,]*\).*/\1/p' | tr -d ,)
     copied=$((copied + ${n:-0}))
@@ -394,6 +408,7 @@ cmd_import_plan() {
   # entries end in "/" and are skipped; mktime reads local time, as does the
   # `now` above, so the difference is a real age in seconds.
   rsync -rt --ignore-existing --dry-run --out-format='%l|%M|%n' "$src/" "$dst/" 2>/dev/null \
+    | head -c "$MAX_STREAM" \
     | head -n 200000 \
     | awk -F'|' -v now="$now" '
         $3 ~ /\/$/ { next }
