@@ -2,7 +2,7 @@
 // each pairing state offers, and turning tool vocabulary into words. Kept
 // free of QML types so the panel stays a thin renderer.
 
-var STATUS_FIELDS = 7
+var STATUS_FIELDS = 9
 var DEPS_FIELDS = 2
 
 var MAX_INPUT = 65536    // characters accepted from one helper run
@@ -59,6 +59,8 @@ function parseStatus(raw) {
     if (f.length < STATUS_FIELDS) continue
     var state = clip(f[2])
     var batt = parseInt(f[3], 10)
+    var free = parseInt(f[7], 10)
+    var total = parseInt(f[8], 10)
     rows.push({
       udid: clip(f[0]),
       name: clip(f[1]) || "iPhone",
@@ -67,6 +69,8 @@ function parseStatus(raw) {
       charging: f[4] === "1",
       mounted: f[5] === "1",
       ios: clip(f[6]),
+      freeBytes: isNaN(free) ? -1 : free,
+      totalBytes: isNaN(total) ? -1 : total,
       paired: state === "paired",
       active: stateRules(state).active
     })
@@ -265,6 +269,25 @@ function summary(rows) {
   return rows.length + (rows.length === 1 ? " device" : " devices") + " · " + (rows.length - paired) + " to pair"
 }
 
+// Free space on the phone, formatted with the same helper as import sizes.
+function storageText(row) {
+  if (!row || row.freeBytes < 0) return ""
+  if (row.totalBytes > 0) return humanSize(row.freeBytes) + " free of " + humanSize(row.totalBytes)
+  return humanSize(row.freeBytes) + " free"
+}
+
+// The panel's second heading line. For one paired phone it shows free space
+// rather than repeating the name that already labels the row below; the
+// many-device cases keep the count summary.
+function heroSubtitle(rows) {
+  if (rows.length === 0) return "No iPhone connected"
+  if (rows.length === 1 && rows[0].paired) {
+    var s = storageText(rows[0])
+    return s !== "" ? s : "Connected"
+  }
+  return summary(rows)
+}
+
 // The one number the bar paints. -1 means nothing worth painting.
 function barBattery(rows) {
   for (var i = 0; i < rows.length; i++)
@@ -339,6 +362,8 @@ if (typeof module !== "undefined") {
     stateText: stateText,
     busyLabel: busyLabel,
     summary: summary,
+    storageText: storageText,
+    heroSubtitle: heroSubtitle,
     barBattery: barBattery,
     attentionCount: attentionCount,
     clampIndex: clampIndex,

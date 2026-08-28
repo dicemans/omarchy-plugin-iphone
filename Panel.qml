@@ -479,7 +479,7 @@ Panel {
             }
 
             Text {
-              text: (root.listError !== "" ? Model.errorText(root.listError) : Model.summary(root.rows)).toUpperCase()
+              text: (root.listError !== "" ? Model.errorText(root.listError) : Model.heroSubtitle(root.rows)).toUpperCase()
               color: root.listError !== "" ? root.bar.urgent : Qt.darker(root.bar.foreground, 1.4)
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption

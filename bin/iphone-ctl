@@ -166,9 +166,10 @@ mount_alive() {
 }
 
 # One line per device:
-#   udid \t name \t state \t battery% \t charging \t mounted \t ios
-# Battery and identity are only readable once paired; before that the fields
-# are empty rather than guessed at.
+#   udid \t name \t state \t battery% \t charging \t mounted \t ios \t free \t total
+# Identity, battery and storage are only readable once paired; before that the
+# fields are empty rather than guessed at. free/total are the data partition's
+# available and total bytes.
 cmd_status() {
   require_idevice
   command -v usbmuxd >/dev/null 2>&1 || die "usbmuxd-missing"
@@ -184,25 +185,29 @@ cmd_status() {
   }
   [[ -n $ids ]] || return 0
 
-  local udid name state batt charging mounted ios
+  local udid name state batt charging mounted ios free total
   while read -r udid; do
     [[ -n $udid ]] || continue
     valid_udid "$udid" || continue
     if [[ -n $filter && $udid != *"$filter"* ]]; then continue; fi
     state=$(pair_state "$udid")
-    name=""; batt=""; charging=0; ios=""
+    name=""; batt=""; charging=0; ios=""; free=""; total=""
     if [[ $state == paired ]]; then
       name=$(device_info "$udid" DeviceName)
       ios=$(device_info "$udid" ProductVersion)
       batt=$(device_info "$udid" BatteryCurrentCapacity com.apple.mobile.battery)
       [[ $(device_info "$udid" BatteryIsCharging com.apple.mobile.battery) == "true" ]] && charging=1
       [[ $batt =~ ^[0-9]{1,3}$ ]] || batt=""
+      free=$(device_info "$udid" TotalDataAvailable com.apple.disk_usage)
+      total=$(device_info "$udid" TotalDataCapacity com.apple.disk_usage)
+      [[ $free =~ ^[0-9]+$ ]] || free=""
+      [[ $total =~ ^[0-9]+$ ]] || total=""
     fi
     mounted=0
     mount_alive "$(mount_point "$udid")" && mounted=1
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$(clip "$udid")" "$(clip "$name")" "$state" \
-      "$batt" "$charging" "$mounted" "$(clip "$ios")"
+      "$batt" "$charging" "$mounted" "$(clip "$ios")" "$free" "$total"
   done <<<"$ids"
 }
 
